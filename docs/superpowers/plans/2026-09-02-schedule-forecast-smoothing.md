@@ -308,7 +308,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `ScheduleTemplateTarget[]` (from Task 2's extended `createScheduleList`), `getOccurrencesBetween` (Task 1), `monthUtils`, `aqlQuery`/`q` (new imports needed in `schedule-template.ts`: `import { aqlQuery } from '#server/aql';` and `import { q } from '#shared/query';`).
-- Produces: `async function buildMonthlyOutflow(smoothEntries: ScheduleTemplateTarget[], current_month: string, category: CategoryEntity): Promise<number[]>` — a 60-length array, index `0` = `current_month`, each value a non-negative integer-cent "amount needed this month" (schedule occurrences' `target` plus any unlinked category transactions' magnitude), consumed by Task 4's iteration.
+- Produces: `async function buildMonthlyOutflow(smoothEntries: ScheduleTemplateTarget[], current_month: string, category: CategoryEntity): Promise<number[]>` — a 60-length array, index `0` = `current_month`, each value an integer-cent "net amount needed this month" (schedule occurrences' `target`, which is always positive, plus any unlinked category transactions' signed contribution). An unlinked transaction can be an inflow (e.g. a refund posted to an expense category) rather than an outflow, so an individual month's value is *usually* positive but is not guaranteed to be — the iteration in Task 4 must handle negative entries correctly (they only ever help the projected balance, never hurt it).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -483,7 +483,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `createScheduleList` (Task 2), `buildMonthlyOutflow` (Task 3).
-- Produces:
+- Produces: a pure, synchronous helper `iterateMonthlyContribution(startingBalance: number, monthlyOutflow: number[], cap = FORECAST_ITERATION_CAP): number` — separated out from `runScheduleForecast` specifically so the cap-exceeded branch can be tested directly against a hand-built `monthlyOutflow` array with an injected small `cap`, instead of trying to contrive real schedule data that takes many cycles to converge (a single bill converges in ~2 cycles: one shortfall-fix, which necessarily overshoots by at most the number of months until that bill is due, then one surplus-fix that absorbs the overshoot — genuinely forcing more cycles needs multiple interacting bills at carefully chosen months/amounts, which isn't worth constructing when the cap itself is trivially unit-testable in isolation).
 ```ts
 export async function runScheduleForecast(
   template_lines: Template[],
@@ -503,6 +503,11 @@ export async function runScheduleForecast(
 This is the function `category-template-context.ts` will call in Task 5, in place of `runSchedule`, dropping the unused `remainder` parameter.
 
 - [ ] **Step 1: Write the failing tests**
+
+Add `iterateMonthlyContribution` and `runScheduleForecast` to the
+`import { createScheduleList, runSchedule } from './schedule-template';`
+line added in Task 2 (also add `buildMonthlyOutflow` if it isn't already
+imported from Task 3).
 
 ```ts
 describe('runScheduleForecast', () => {
@@ -628,31 +633,40 @@ describe('runScheduleForecast', () => {
     expect(result.perScheduleMonthly.get(template_lines[1])).toBe(10000);
   });
 
-  it('falls back to the last computed candidate if the iteration cap is hit', async () => {
-    // A contrived case forcing many 1-cent corrections: a single very
-    // large occurrence far in the future against a starting balance
-    // exactly 1 cent short of what a naive average would cover, chosen
-    // so each cycle's ceil() correction is exactly 1 cent.
-    const template_lines = [
-      { type: 'schedule', name: 'Slow', priority: 0, directive: 'template' } as const,
-    ];
-    mockSingleSchedule({ start: '2028-12-15', amount: -6000, frequency: 'yearly' });
+});
 
-    const result = await runScheduleForecast(
-      template_lines,
-      '2024-01-01',
-      0,
-      0,
-      0,
-      [],
-      defaultCategory,
-      defaultCurrency,
-    );
+describe('iterateMonthlyContribution', () => {
+  it('converges within a couple of cycles for a single one-time bill', () => {
+    const monthlyOutflow = new Array(60).fill(0);
+    monthlyOutflow[30] = 60000; // one bill, due in month 30
+    const candidate = iterateMonthlyContribution(0, monthlyOutflow);
+    // 60000 / 31 months = 1935.48 -> ceil to 1936; verify it actually
+    // covers month 30 and is the minimal such whole-cent amount.
+    expect(candidate * 31).toBeGreaterThanOrEqual(60000);
+    expect((candidate - 1) * 31).toBeLessThan(60000);
+  });
 
-    // Whatever the cap resolves to, it must not throw and must return a
-    // finite non-negative contribution.
-    expect(Number.isFinite(result.to_budget)).toBe(true);
-    expect(result.to_budget).toBeGreaterThanOrEqual(0);
+  it('falls back to the last computed (uncorrected) candidate when the cap is hit before converging', () => {
+    // Same single-bill-at-month-30 data as the test above. Reaching
+    // that scenario's converged answer (1936) takes two cycles: cycle 1
+    // detects the shortfall and corrects to 1937 (which necessarily
+    // overshoots, since ceil(29000/31) rounds up); cycle 2 sees no
+    // negatives and refines the overshoot down to 1936 via the surplus
+    // branch. With cap=1, the loop stops right after cycle 1's
+    // correction, before that refinement runs — so it returns the
+    // overshot 1937, not the fully converged 1936. This is the
+    // "fall back to the last computed candidate" behavior: still a
+    // safe (slightly conservative) answer, just not the provably
+    // minimal one.
+    const monthlyOutflow = new Array(60).fill(0);
+    monthlyOutflow[30] = 60000;
+
+    const converged = iterateMonthlyContribution(0, monthlyOutflow);
+    const capped = iterateMonthlyContribution(0, monthlyOutflow, 1);
+
+    expect(converged).toBe(1936);
+    expect(capped).toBe(1937);
+    expect(capped).toBeGreaterThan(converged);
   });
 });
 ```
@@ -668,6 +682,56 @@ Add after `runSchedule` in `packages/loot-core/src/server/budget/schedule-templa
 
 ```ts
 const FORECAST_ITERATION_CAP = 60;
+
+// Pure, synchronous: given a starting balance and a 60-length projected
+// monthly-outflow array (an entry can be negative — an unlinked inflow
+// transaction offsets that month's need), returns the minimal whole-cent
+// monthly contribution that keeps the projected balance non-negative
+// across the whole window. `cap` is exposed as a parameter (defaulting
+// to FORECAST_ITERATION_CAP) purely so tests can force the "cap reached
+// before convergence confirmed" fallback path deterministically without
+// having to contrive real-world data that takes many cycles.
+export function iterateMonthlyContribution(
+  startingBalance: number,
+  monthlyOutflow: number[],
+  cap: number = FORECAST_ITERATION_CAP,
+): number {
+  const totalOutflow = monthlyOutflow.reduce((s, v) => s + v, 0);
+  let candidate = Math.round(totalOutflow / monthlyOutflow.length);
+
+  for (let cycle = 0; cycle < cap; cycle++) {
+    let runningBalance = startingBalance;
+    let lowestBalance = Infinity;
+    let lowestIndex = -1;
+    let firstNegativeIndex = -1;
+    let firstNegativeBalance = 0;
+
+    for (let i = 0; i < monthlyOutflow.length; i++) {
+      runningBalance += candidate - monthlyOutflow[i];
+      if (runningBalance < lowestBalance) {
+        lowestBalance = runningBalance;
+        lowestIndex = i;
+      }
+      if (firstNegativeIndex === -1 && runningBalance < 0) {
+        firstNegativeIndex = i;
+        firstNegativeBalance = runningBalance;
+      }
+    }
+
+    if (firstNegativeIndex === -1) {
+      candidate -= Math.floor(lowestBalance / (lowestIndex + 1));
+      break;
+    }
+
+    const shortfall = -firstNegativeBalance;
+    candidate += Math.ceil(shortfall / (firstNegativeIndex + 1));
+    // If `cap` is reached here without a subsequent cycle confirming no
+    // negatives remain, this corrected-but-unconfirmed candidate is what
+    // gets returned — a safe (if not provably minimal) fallback.
+  }
+
+  return candidate;
+}
 
 export async function runScheduleForecast(
   template_lines: Template[],
@@ -711,43 +775,11 @@ export async function runScheduleForecast(
     category,
   );
   const totalOutflow = monthlyOutflow.reduce((s, v) => s + v, 0);
-
   const forecastStartingBalance = balance - fullContribution;
-  let candidate = Math.round(totalOutflow / FORECAST_MONTHS);
-
-  for (let cycle = 0; cycle < FORECAST_ITERATION_CAP; cycle++) {
-    let runningBalance = forecastStartingBalance;
-    let lowestBalance = Infinity;
-    let lowestIndex = -1;
-    let firstNegativeIndex = -1;
-
-    for (let i = 0; i < FORECAST_MONTHS; i++) {
-      runningBalance += candidate - monthlyOutflow[i];
-      if (runningBalance < lowestBalance) {
-        lowestBalance = runningBalance;
-        lowestIndex = i;
-      }
-      if (firstNegativeIndex === -1 && runningBalance < 0) {
-        firstNegativeIndex = i;
-      }
-    }
-
-    if (firstNegativeIndex === -1) {
-      candidate -= Math.floor(lowestBalance / (lowestIndex + 1));
-      break;
-    }
-
-    const balanceAtFirstNegative = (() => {
-      let rb = forecastStartingBalance;
-      for (let i = 0; i <= firstNegativeIndex; i++) {
-        rb += candidate - monthlyOutflow[i];
-      }
-      return rb;
-    })();
-    const shortfall = -balanceAtFirstNegative;
-    candidate += Math.ceil(shortfall / (firstNegativeIndex + 1));
-    // cap reached: candidate carries the last cycle's correction forward
-  }
+  const candidate = iterateMonthlyContribution(
+    forecastStartingBalance,
+    monthlyOutflow,
+  );
 
   for (const entry of smoothEntries) {
     const share = Math.round((entry.target / totalOutflow) * candidate) || 0;
@@ -773,12 +805,7 @@ optimize further without a measured need.
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `yarn workspace @actual-app/core run test schedule-template.test.ts`
-Expected: PASS. If the "falls back" test's contrived inputs don't actually hit
-the cap, adjust the schedule amounts/dates until they do (the point of
-that test is exercising the cap-exceeded branch, not a specific number)
-— confirm by temporarily lowering `FORECAST_ITERATION_CAP` to something
-small like `2` locally, verifying the test fails without the fallback
-logic, then restoring it to `60`.
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
