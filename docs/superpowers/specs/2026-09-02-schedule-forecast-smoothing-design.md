@@ -162,6 +162,21 @@ argmax month negative. `candidate = max(0, ...)` for `smoothSchedules`
 empty (all `monthlyOutflow[i] = 0`, all thresholds `<= 0`, loop is a
 no-op past the `candidate = 0` initialization).
 
+**Overfunded categories.** `threshold_i` can be negative for every `i`
+when `forecastStartingBalance` already covers projected outflow for
+the whole window (e.g. `monthlyOutflow` includes a large unlinked
+inflow, or the category was previously overfunded by the old
+heuristic) — the `candidate = max(0, ...)` clamp then yields `0`, so
+no new money is requested. This is not an explicit "release surplus
+back to the budget" step; there's no path that subtracts from
+`to_budget`. Instead, the surplus is drawn down implicitly: as
+`current_month` advances each budget cycle, `cumsum[i]` shifts forward
+to include more of the outflow the surplus is covering, so
+`threshold_i` rises back toward (and eventually past) zero on its own.
+The category simply stops asking for new contributions until the
+surplus is spent down to the point where it's needed again — a gradual
+transition with no separate mechanism required.
+
 - Month index `i`'s balance (per the recurrence below) includes month
   `i`'s own candidate contribution before subtracting month `i`'s
   outflow (fund-then-spend ordering) — this is what makes a
