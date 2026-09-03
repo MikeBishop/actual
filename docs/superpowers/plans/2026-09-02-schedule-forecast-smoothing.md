@@ -45,10 +45,12 @@ builder (`#shared/query`, `#server/aql`).
 ### Task 1: Extract `getOccurrencesBetween` shared occurrence helper
 
 **Files:**
+
 - Modify: `packages/loot-core/src/shared/schedules.ts:436-516` (`computeSchedulePreviewTransactions`)
 - Test: `packages/loot-core/src/shared/schedules.test.ts`
 
 **Interfaces:**
+
 - Produces: `export function getOccurrencesBetween(dateCond, startDay: string, endDay: string): string[]` — every occurrence date (`'YYYY-MM-DD'` strings) of the recurrence rule described by `dateCond` (the `{ op, field: 'date', value }` shape returned by `extractScheduleConds(...).date`) that falls in `[startDay, endDay)`. Non-recurring `dateCond` (a plain date, not a recur rule) returns `[]` if its date is outside the range, or `[date]` if inside — mirrors how `computeSchedulePreviewTransactions` seeds `dates` with `schedule.next_date` before iterating.
 - Consumes: `getNextDate`, `scheduleIsRecurring`, `monthUtils` (already imported in `schedules.ts`).
 
@@ -81,13 +83,25 @@ describe('getOccurrencesBetween', () => {
   });
 
   it('returns an empty array when the single non-repeating date is outside the range', () => {
-    const dateCond = { op: 'is' as const, field: 'date' as const, value: '2023-06-01' };
-    expect(getOccurrencesBetween(dateCond, '2024-01-01', '2024-04-01')).toEqual([]);
+    const dateCond = {
+      op: 'is' as const,
+      field: 'date' as const,
+      value: '2023-06-01',
+    };
+    expect(getOccurrencesBetween(dateCond, '2024-01-01', '2024-04-01')).toEqual(
+      [],
+    );
   });
 
   it('returns the single date when a non-repeating date is inside the range', () => {
-    const dateCond = { op: 'is' as const, field: 'date' as const, value: '2024-02-01' };
-    expect(getOccurrencesBetween(dateCond, '2024-01-01', '2024-04-01')).toEqual(['2024-02-01']);
+    const dateCond = {
+      op: 'is' as const,
+      field: 'date' as const,
+      value: '2024-02-01',
+    };
+    expect(getOccurrencesBetween(dateCond, '2024-01-01', '2024-04-01')).toEqual(
+      ['2024-02-01'],
+    );
   });
 });
 ```
@@ -114,11 +128,7 @@ export function getOccurrencesBetween(
   if (!isRecurring) {
     const singleDate =
       typeof dateCond.value === 'string' ? dateCond.value : null;
-    if (
-      singleDate &&
-      singleDate >= startDay &&
-      singleDate < endDay
-    ) {
+    if (singleDate && singleDate >= startDay && singleDate < endDay) {
       return [singleDate];
     }
     return [];
@@ -140,17 +150,17 @@ export function getOccurrencesBetween(
 Then replace the hand-rolled loop in `computeSchedulePreviewTransactions` (lines ~465-493) — the part building `dates` for recurring schedules — with a call to the new helper, preserving the existing `dates = [schedule.next_date]` seed and `dates.includes(nextDate)` dedup behavior:
 
 ```ts
-      const dates = [schedule.next_date];
-      if (isRecurring) {
-        const occurrences = getOccurrencesBetween(
-          dateConditions,
-          monthUtils.dayFromDate(day),
-          monthUtils.dayFromDate(upcomingPeriodEnd),
-        );
-        for (const occurrence of occurrences) {
-          if (!dates.includes(occurrence)) dates.push(occurrence);
-        }
-      }
+const dates = [schedule.next_date];
+if (isRecurring) {
+  const occurrences = getOccurrencesBetween(
+    dateConditions,
+    monthUtils.dayFromDate(day),
+    monthUtils.dayFromDate(upcomingPeriodEnd),
+  );
+  for (const occurrence of occurrences) {
+    if (!dates.includes(occurrence)) dates.push(occurrence);
+  }
+}
 ```
 
 (Remove the now-unused `day` mutation loop and the `nextDate`/`break` logic that previously lived inline — `getOccurrencesBetween` owns that now.)
@@ -182,10 +192,12 @@ EOF
 ### Task 2: Carry `dateConditions` through `createScheduleList`'s per-schedule entries
 
 **Files:**
+
 - Modify: `packages/loot-core/src/server/budget/schedule-template.ts:20-31` (`ScheduleTemplateTarget` type), `:150-162` (push site)
 - Test: `packages/loot-core/src/server/budget/schedule-template.test.ts`
 
 **Interfaces:**
+
 - Produces: `ScheduleTemplateTarget` gains a `dateConditions` field (the same object already computed at `schedule-template.ts:60` as `const { date: dateConditions, ... } = extractScheduleConds(conditions)`), so `runScheduleForecast` (Task 4) can enumerate every future occurrence per schedule without re-deriving it.
 - Consumes: nothing new — `dateConditions` is already in scope at the push site.
 
@@ -255,24 +267,25 @@ type ScheduleTemplateTarget = {
   dateConditions: ReturnType<typeof extractScheduleConds>['date'];
 };
 ```
+
 (Import `extractScheduleConds`'s return type is already imported as a function at the top of the file — this uses `ReturnType` so no new import is needed.)
 
 3. At the push site (~line 150), add `dateConditions` to the pushed object:
 
 ```ts
-      t.push({
-        template,
-        target,
-        next_date_string,
-        target_interval,
-        target_frequency,
-        num_months,
-        completed,
-        full: template.full === null ? false : template.full,
-        repeat: isRepeating,
-        name: displayName,
-        dateConditions,
-      });
+t.push({
+  template,
+  target,
+  next_date_string,
+  target_interval,
+  target_frequency,
+  num_months,
+  completed,
+  full: template.full === null ? false : template.full,
+  repeat: isRepeating,
+  name: displayName,
+  dateConditions,
+});
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -303,12 +316,14 @@ EOF
 ### Task 3: Build the 60-month `monthlyOutflow` array
 
 **Files:**
+
 - Modify: `packages/loot-core/src/server/budget/schedule-template.ts` (new function, added after `createScheduleList`)
 - Test: `packages/loot-core/src/server/budget/schedule-template.test.ts`
 
 **Interfaces:**
+
 - Consumes: `ScheduleTemplateTarget[]` (from Task 2's extended `createScheduleList`), `getOccurrencesBetween` (Task 1), `monthUtils`, `aqlQuery`/`q` (new imports needed in `schedule-template.ts`: `import { aqlQuery } from '#server/aql';` and `import { q } from '#shared/query';`).
-- Produces: `async function buildMonthlyOutflow(smoothEntries: ScheduleTemplateTarget[], current_month: string, category: CategoryEntity): Promise<number[]>` — a 60-length array, index `0` = `current_month`, each value an integer-cent "net amount needed this month" (schedule occurrences' `target`, which is always positive, plus any unlinked category transactions' signed contribution). An unlinked transaction can be an inflow (e.g. a refund posted to an expense category) rather than an outflow, so an individual month's value is *usually* positive but is not guaranteed to be — the iteration in Task 4 must handle negative entries correctly (they only ever help the projected balance, never hurt it).
+- Produces: `async function buildMonthlyOutflow(smoothEntries: ScheduleTemplateTarget[], current_month: string, category: CategoryEntity): Promise<number[]>` — a 60-length array, index `0` = `current_month`, each value an integer-cent "net amount needed this month" (schedule occurrences' `target`, which is always positive, plus any unlinked category transactions' signed contribution). An unlinked transaction can be an inflow (e.g. a refund posted to an expense category) rather than an outflow, so an individual month's value is _usually_ positive but is not guaranteed to be — the iteration in Task 4 must handle negative entries correctly (they only ever help the projected balance, never hurt it).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -390,6 +405,7 @@ Expected: FAIL — `buildMonthlyOutflow` doesn't exist.
 - [ ] **Step 3: Implement**
 
 Add near the top of `packages/loot-core/src/server/budget/schedule-template.ts`:
+
 ```ts
 import { aqlQuery } from '#server/aql';
 import { q } from '#shared/query';
@@ -478,12 +494,15 @@ EOF
 ### Task 4: Implement `runScheduleForecast`
 
 **Files:**
+
 - Modify: `packages/loot-core/src/server/budget/schedule-template.ts` (new function, added after `runSchedule`)
 - Test: `packages/loot-core/src/server/budget/schedule-template.test.ts`
 
 **Interfaces:**
+
 - Consumes: `createScheduleList` (Task 2), `buildMonthlyOutflow` (Task 3).
-- Produces: a pure, synchronous helper `iterateMonthlyContribution(startingBalance: number, monthlyOutflow: number[], cap = FORECAST_ITERATION_CAP): number` — separated out from `runScheduleForecast` specifically so the cap-exceeded branch can be tested directly against a hand-built `monthlyOutflow` array with an injected small `cap`, instead of trying to contrive real schedule data that takes many cycles to converge (a single bill converges in ~2 cycles: one shortfall-fix, which necessarily overshoots by at most the number of months until that bill is due, then one surplus-fix that absorbs the overshoot — genuinely forcing more cycles needs multiple interacting bills at carefully chosen months/amounts, which isn't worth constructing when the cap itself is trivially unit-testable in isolation).
+- Produces: a pure, synchronous helper `solveMonthlyContribution(startingBalance: number, monthlyOutflow: number[]): number` — separated out from `runScheduleForecast` so it's directly unit-testable against a hand-built `monthlyOutflow` array without going through `createScheduleList`/`buildMonthlyOutflow`. It computes the minimal whole-cent monthly contribution that keeps the projected balance non-negative across the 60-month window, in one O(60) pass — see the design spec's Iteration Algorithm section for the derivation (each month `i`'s exact break-even contribution, `threshold_i = ceil((cumsum[i] - startingBalance) / (i + 1))`, is independent of any guess; the answer is `max_i(threshold_i)`).
+
 ```ts
 export async function runScheduleForecast(
   template_lines: Template[],
@@ -498,13 +517,14 @@ export async function runScheduleForecast(
   to_budget: number;
   errors: string[];
   perScheduleMonthly: Map<ScheduleTemplate, number>;
-}>
+}>;
 ```
+
 This is the function `category-template-context.ts` will call in Task 5, in place of `runSchedule`, dropping the unused `remainder` parameter.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add `iterateMonthlyContribution` and `runScheduleForecast` to the
+Add `solveMonthlyContribution` and `runScheduleForecast` to the
 `import { createScheduleList, runSchedule } from './schedule-template';`
 line added in Task 2 (also add `buildMonthlyOutflow` if it isn't already
 imported from Task 3).
@@ -519,9 +539,18 @@ describe('runScheduleForecast', () => {
 
   it('contributes the exact monthly amount for a single monthly schedule', async () => {
     const template_lines = [
-      { type: 'schedule', name: 'Rent', priority: 0, directive: 'template' } as const,
+      {
+        type: 'schedule',
+        name: 'Rent',
+        priority: 0,
+        directive: 'template',
+      } as const,
     ];
-    mockSingleSchedule({ start: '2024-01-15', amount: -10000, frequency: 'monthly' });
+    mockSingleSchedule({
+      start: '2024-01-15',
+      amount: -10000,
+      frequency: 'monthly',
+    });
 
     const result = await runScheduleForecast(
       template_lines,
@@ -540,12 +569,26 @@ describe('runScheduleForecast', () => {
 
   it('never projects a negative month-end balance across two schedules sharing a category', async () => {
     const template_lines = [
-      { type: 'schedule', name: 'Monthly', priority: 0, directive: 'template' } as const,
-      { type: 'schedule', name: 'Yearly', priority: 0, directive: 'template' } as const,
+      {
+        type: 'schedule',
+        name: 'Monthly',
+        priority: 0,
+        directive: 'template',
+      } as const,
+      {
+        type: 'schedule',
+        name: 'Yearly',
+        priority: 0,
+        directive: 'template',
+      } as const,
     ];
     mockSchedulesByName({
-      Monthly: { spec: { start: '2024-01-15', amount: -10000, frequency: 'monthly' } },
-      Yearly: { spec: { start: '2024-12-15', amount: -60000, frequency: 'yearly' } },
+      Monthly: {
+        spec: { start: '2024-01-15', amount: -10000, frequency: 'monthly' },
+      },
+      Yearly: {
+        spec: { start: '2024-12-15', amount: -60000, frequency: 'yearly' },
+      },
     });
 
     const result = await runScheduleForecast(
@@ -588,9 +631,18 @@ describe('runScheduleForecast', () => {
 
   it('covers a same-month-due schedule in full immediately rather than smoothing it away', async () => {
     const template_lines = [
-      { type: 'schedule', name: 'DueNow', priority: 0, directive: 'template' } as const,
+      {
+        type: 'schedule',
+        name: 'DueNow',
+        priority: 0,
+        directive: 'template',
+      } as const,
     ];
-    mockSingleSchedule({ start: '2024-01-15', amount: -60000, frequency: 'yearly' });
+    mockSingleSchedule({
+      start: '2024-01-15',
+      amount: -60000,
+      frequency: 'yearly',
+    });
 
     const result = await runScheduleForecast(
       template_lines,
@@ -608,12 +660,27 @@ describe('runScheduleForecast', () => {
 
   it('budgets full-flag schedules on top of, and separate from, the forecast', async () => {
     const template_lines = [
-      { type: 'schedule', name: 'Full', full: true, priority: 0, directive: 'template' } as const,
-      { type: 'schedule', name: 'Smooth', priority: 0, directive: 'template' } as const,
+      {
+        type: 'schedule',
+        name: 'Full',
+        full: true,
+        priority: 0,
+        directive: 'template',
+      } as const,
+      {
+        type: 'schedule',
+        name: 'Smooth',
+        priority: 0,
+        directive: 'template',
+      } as const,
     ];
     mockSchedulesByName({
-      Full: { spec: { start: '2024-12-15', amount: -60000, frequency: 'yearly' } },
-      Smooth: { spec: { start: '2024-01-15', amount: -10000, frequency: 'monthly' } },
+      Full: {
+        spec: { start: '2024-12-15', amount: -60000, frequency: 'yearly' },
+      },
+      Smooth: {
+        spec: { start: '2024-01-15', amount: -10000, frequency: 'monthly' },
+      },
     });
 
     const result = await runScheduleForecast(
@@ -632,41 +699,46 @@ describe('runScheduleForecast', () => {
     expect(result.to_budget).toBe(10000);
     expect(result.perScheduleMonthly.get(template_lines[1])).toBe(10000);
   });
-
 });
 
-describe('iterateMonthlyContribution', () => {
-  it('converges within a couple of cycles for a single one-time bill', () => {
+describe('solveMonthlyContribution', () => {
+  it('finds the minimal whole-cent contribution for a single one-time bill', () => {
     const monthlyOutflow = new Array(60).fill(0);
     monthlyOutflow[30] = 60000; // one bill, due in month 30
-    const candidate = iterateMonthlyContribution(0, monthlyOutflow);
+    const candidate = solveMonthlyContribution(0, monthlyOutflow);
     // 60000 / 31 months = 1935.48 -> ceil to 1936; verify it actually
     // covers month 30 and is the minimal such whole-cent amount.
     expect(candidate * 31).toBeGreaterThanOrEqual(60000);
     expect((candidate - 1) * 31).toBeLessThan(60000);
   });
 
-  it('falls back to the last computed (uncorrected) candidate when the cap is hit before converging', () => {
-    // Same single-bill-at-month-30 data as the test above. Reaching
-    // that scenario's converged answer (1936) takes two cycles: cycle 1
-    // detects the shortfall and corrects to 1937 (which necessarily
-    // overshoots, since ceil(29000/31) rounds up); cycle 2 sees no
-    // negatives and refines the overshoot down to 1936 via the surplus
-    // branch. With cap=1, the loop stops right after cycle 1's
-    // correction, before that refinement runs — so it returns the
-    // overshot 1937, not the fully converged 1936. This is the
-    // "fall back to the last computed candidate" behavior: still a
-    // safe (slightly conservative) answer, just not the provably
-    // minimal one.
-    const monthlyOutflow = new Array(60).fill(0);
-    monthlyOutflow[30] = 60000;
+  it('picks the early month with the larger threshold, not the late month with the larger raw balance', () => {
+    // Regression test for the weighting bug the closed form replaces
+    // (see the design spec's Iteration Algorithm > Derivation section).
+    // Month 0 needs 100/cent-month (weight 1); month 59 needs slightly
+    // less per-cent-month but the raw shortfall at any shared candidate
+    // is larger there purely because of the (i+1) weighting. The
+    // correct answer is governed by whichever month's *threshold*
+    // (need / (i+1)) is larger, not whichever month's raw balance is
+    // more negative — here that's month 0.
+    // Month 0's own outflow is 100 (threshold_0 = 100/1 = 100). Month
+    // 59's *cumulative* outflow needs to make threshold_59 = 149, i.e.
+    // cumsum_59 = 149 * 60 = 8940, with month 0's 100 already part of
+    // that cumulative sum.
+    const outflow = new Array(60).fill(0);
+    outflow[0] = 100;
+    outflow[59] = 8940 - 100;
 
-    const converged = iterateMonthlyContribution(0, monthlyOutflow);
-    const capped = iterateMonthlyContribution(0, monthlyOutflow, 1);
+    const candidate = solveMonthlyContribution(0, outflow);
+    expect(candidate).toBe(149); // threshold_59, the true max — not threshold_0 (100)
 
-    expect(converged).toBe(1936);
-    expect(capped).toBe(1937);
-    expect(capped).toBeGreaterThan(converged);
+    let runningBalance = 0;
+    let minBalance = Infinity;
+    for (let i = 0; i < 60; i++) {
+      runningBalance += candidate - outflow[i];
+      minBalance = Math.min(minBalance, runningBalance);
+    }
+    expect(minBalance).toBeGreaterThanOrEqual(0);
   });
 });
 ```
@@ -681,53 +753,35 @@ Expected: FAIL — `runScheduleForecast` doesn't exist.
 Add after `runSchedule` in `packages/loot-core/src/server/budget/schedule-template.ts`:
 
 ```ts
-const FORECAST_ITERATION_CAP = 60;
-
 // Pure, synchronous: given a starting balance and a 60-length projected
 // monthly-outflow array (an entry can be negative — an unlinked inflow
 // transaction offsets that month's need), returns the minimal whole-cent
 // monthly contribution that keeps the projected balance non-negative
-// across the whole window. `cap` is exposed as a parameter (defaulting
-// to FORECAST_ITERATION_CAP) purely so tests can force the "cap reached
-// before convergence confirmed" fallback path deterministically without
-// having to contrive real-world data that takes many cycles.
-export function iterateMonthlyContribution(
+// across the whole window.
+//
+// Each month i's balance is affine in `candidate`:
+//   balance[i] = startingBalance + (i + 1) * candidate - cumsum[i]
+// so balance[i] >= 0 for all i  <=>  candidate >= threshold_i for all i,
+// where threshold_i = (cumsum[i] - startingBalance) / (i + 1) does not
+// depend on candidate at all. The answer is simply max_i(threshold_i) —
+// see the design spec's Iteration Algorithm section for the derivation
+// and why an earlier guess-and-correct version of this function was
+// wrong (it operated on each month's raw balance, which is the
+// threshold gap scaled by (i + 1) — a late month's small gap can
+// produce a larger raw balance than an early month's large gap, so
+// picking the extremum of raw balance does not reliably find
+// max_i(threshold_i)).
+export function solveMonthlyContribution(
   startingBalance: number,
   monthlyOutflow: number[],
-  cap: number = FORECAST_ITERATION_CAP,
 ): number {
-  const totalOutflow = monthlyOutflow.reduce((s, v) => s + v, 0);
-  let candidate = Math.round(totalOutflow / monthlyOutflow.length);
+  let candidate = 0;
+  let cumsum = 0;
 
-  for (let cycle = 0; cycle < cap; cycle++) {
-    let runningBalance = startingBalance;
-    let lowestBalance = Infinity;
-    let lowestIndex = -1;
-    let firstNegativeIndex = -1;
-    let firstNegativeBalance = 0;
-
-    for (let i = 0; i < monthlyOutflow.length; i++) {
-      runningBalance += candidate - monthlyOutflow[i];
-      if (runningBalance < lowestBalance) {
-        lowestBalance = runningBalance;
-        lowestIndex = i;
-      }
-      if (firstNegativeIndex === -1 && runningBalance < 0) {
-        firstNegativeIndex = i;
-        firstNegativeBalance = runningBalance;
-      }
-    }
-
-    if (firstNegativeIndex === -1) {
-      candidate -= Math.floor(lowestBalance / (lowestIndex + 1));
-      break;
-    }
-
-    const shortfall = -firstNegativeBalance;
-    candidate += Math.ceil(shortfall / (firstNegativeIndex + 1));
-    // If `cap` is reached here without a subsequent cycle confirming no
-    // negatives remain, this corrected-but-unconfirmed candidate is what
-    // gets returned — a safe (if not provably minimal) fallback.
+  for (let i = 0; i < monthlyOutflow.length; i++) {
+    cumsum += monthlyOutflow[i];
+    const threshold = Math.ceil((cumsum - startingBalance) / (i + 1));
+    candidate = Math.max(candidate, threshold);
   }
 
   return candidate;
@@ -761,12 +815,19 @@ export async function runScheduleForecast(
 
   const perScheduleMonthly = new Map<ScheduleTemplate, number>();
   const fullContribution = fullEntries.reduce((sum, c) => {
-    perScheduleMonthly.set(c.template, (perScheduleMonthly.get(c.template) ?? 0) + c.target);
+    perScheduleMonthly.set(
+      c.template,
+      (perScheduleMonthly.get(c.template) ?? 0) + c.target,
+    );
     return sum + c.target;
   }, 0);
 
   if (smoothEntries.length === 0) {
-    return { to_budget: to_budget + fullContribution, errors, perScheduleMonthly };
+    return {
+      to_budget: to_budget + fullContribution,
+      errors,
+      perScheduleMonthly,
+    };
   }
 
   const monthlyOutflow = await buildMonthlyOutflow(
@@ -776,7 +837,7 @@ export async function runScheduleForecast(
   );
   const totalOutflow = monthlyOutflow.reduce((s, v) => s + v, 0);
   const forecastStartingBalance = balance - fullContribution;
-  const candidate = iterateMonthlyContribution(
+  const candidate = solveMonthlyContribution(
     forecastStartingBalance,
     monthlyOutflow,
   );
@@ -797,11 +858,6 @@ export async function runScheduleForecast(
 }
 ```
 
-Note: `lowestIndex`/`firstNegativeIndex` are recomputed from scratch each
-cycle (60 × 60 = 3600 additions worst case) rather than threaded
-through incrementally — simple and fast enough at this scale; don't
-optimize further without a measured need.
-
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `yarn workspace @actual-app/core run test schedule-template.test.ts`
@@ -815,11 +871,11 @@ git commit -m "$(cat <<'EOF'
 [AI] feat: add runScheduleForecast smoothing algorithm
 
 Projects each category's smooth (non-full-flag) schedule outflows 60
-months forward and iterates the monthly contribution until the
-projected balance never goes negative, converging on the minimal
-smoothed amount instead of today's independent-per-schedule sinking
-heuristic. Not yet wired into the budget engine — that's the next
-commit, gated behind a constant.
+months forward and solves directly for the minimal monthly
+contribution that keeps the projected balance non-negative throughout,
+instead of today's independent-per-schedule sinking heuristic. Not yet
+wired into the budget engine — that's the next commit, gated behind a
+constant.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF
@@ -831,18 +887,23 @@ EOF
 ### Task 5: Wire the gate into `category-template-context.ts`
 
 **Files:**
+
 - Modify: `packages/loot-core/src/server/budget/category-template-context.ts:30` (import), `:162-163` (state), `:209-231` (`case 'schedule':` branch)
 
 **Interfaces:**
+
 - Consumes: `runScheduleForecast` (Task 4), alongside the existing `runSchedule` import.
 
 - [ ] **Step 1: Add the gate constant and import**
 
 In `packages/loot-core/src/server/budget/category-template-context.ts`, change line 30:
+
 ```ts
 import { runSchedule, runScheduleForecast } from './schedule-template';
 ```
+
 Add near the top of the file (after imports, before the class):
+
 ```ts
 // Build-time switch: selects the 60-month-forecast smoothing algorithm
 // (runScheduleForecast) instead of today's payMonthOf/sinking heuristic
@@ -861,6 +922,7 @@ export const scheduleForecastConfig = { enabled: false };
 - [ ] **Step 2: Switch the call site**
 
 Replace the body of `case 'schedule':` (lines 209-231):
+
 ```ts
         case 'schedule': {
           if (!scheduleFlag) {
@@ -942,6 +1004,7 @@ vi.mock('#server/schedules/app', async () => {
 ```
 
 Then, near the top of the file, import what the new tests need:
+
 ```ts
 import { Rule } from '#server/rules';
 import { getRuleForSchedule } from '#server/schedules/app';
@@ -1058,7 +1121,14 @@ describe('schedule template gating', () => {
       0,
       [],
       category,
-      { code: 'USD', symbol: '$', name: 'US Dollar', decimalPlaces: 2, numberFormat: 'comma-dot', symbolFirst: true },
+      {
+        code: 'USD',
+        symbol: '$',
+        name: 'US Dollar',
+        decimalPlaces: 2,
+        numberFormat: 'comma-dot',
+        symbolFirst: true,
+      },
     );
     expect(result).toBe(expected.to_budget);
   });
@@ -1067,9 +1137,12 @@ describe('schedule template gating', () => {
     scheduleForecastConfig.enabled = true;
     vi.mocked(aql.aqlQuery).mockImplementation(async (query: unknown) => {
       const queryStr = JSON.stringify(query);
-      if (queryStr.includes('transactions')) return { data: [], dependencies: [] };
-      if (queryStr.includes('hideFraction')) return { data: [{ value: 'false' }], dependencies: [] };
-      if (queryStr.includes('defaultCurrencyCode')) return { data: [{ value: 'USD' }], dependencies: [] };
+      if (queryStr.includes('transactions'))
+        return { data: [], dependencies: [] };
+      if (queryStr.includes('hideFraction'))
+        return { data: [{ value: 'false' }], dependencies: [] };
+      if (queryStr.includes('defaultCurrencyCode'))
+        return { data: [{ value: 'USD' }], dependencies: [] };
       return { data: [], dependencies: [] };
     });
 
@@ -1089,7 +1162,14 @@ describe('schedule template gating', () => {
       0,
       [],
       category,
-      { code: 'USD', symbol: '$', name: 'US Dollar', decimalPlaces: 2, numberFormat: 'comma-dot', symbolFirst: true },
+      {
+        code: 'USD',
+        symbol: '$',
+        name: 'US Dollar',
+        decimalPlaces: 2,
+        numberFormat: 'comma-dot',
+        symbolFirst: true,
+      },
     );
     expect(result).toBe(expected.to_budget);
   });
