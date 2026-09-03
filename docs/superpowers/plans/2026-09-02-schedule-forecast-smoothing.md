@@ -27,8 +27,8 @@ builder (`#shared/query`, `#server/aql`).
 ## Global Constraints
 
 - No user-facing setting yet — selection between old/new algorithm is
-  a build-time constant (`USE_SCHEDULE_FORECAST` in
-  `category-template-context.ts`), defaulting to `false`.
+  a build-time, test-settable switch (`scheduleForecastConfig.enabled`
+  in `category-template-context.ts`), defaulting to `false`.
 - `full`-flagged schedule templates keep today's exact behavior
   unchanged (paid in full when due, added on top, never smoothed).
 - All money amounts are integer cents throughout (existing convention
@@ -849,7 +849,13 @@ Add near the top of the file (after imports, before the class):
 // (runSchedule) for schedule-type templates. Not yet a user-facing or
 // per-category setting — flip to measure perf before deciding rollout.
 // See docs/superpowers/specs/2026-09-02-schedule-forecast-smoothing-design.md
-const USE_SCHEDULE_FORECAST = false;
+//
+// Exported as a mutable object, not a bare const, so tests can flip it
+// per-`describe`/`it` block and exercise both dispatch paths through the
+// same integration surface, rather than only reaching runSchedule and
+// runScheduleForecast directly (schedule-template.test.ts) or having to
+// module-mock this file to test the gate itself.
+export const scheduleForecastConfig = { enabled: false };
 ```
 
 - [ ] **Step 2: Switch the call site**
@@ -859,7 +865,7 @@ Replace the body of `case 'schedule':` (lines 209-231):
         case 'schedule': {
           if (!scheduleFlag) {
             const budgeted = this.fromLastMonth + toBudget;
-            const ret = USE_SCHEDULE_FORECAST
+            const ret = scheduleForecastConfig.enabled
               ? await runScheduleForecast(
                   t,
                   this.month,
@@ -903,27 +909,216 @@ Expected: all existing tests pass unchanged (gate defaults to `false`, so
 exercises `runSchedule` exactly as before). The new `runScheduleForecast`
 tests from Task 4 also pass.
 
-- [ ] **Step 4: Manually verify the gate can be flipped**
+- [ ] **Step 4: Add explicit dispatch tests for both gate states**
 
-Temporarily set `USE_SCHEDULE_FORECAST = true`, run
-`yarn workspace @actual-app/core run test schedule-template.test.ts
-category-template-context.test.ts`, confirm nothing throws (some
-existing `category-template-context.test.ts` assertions that hardcode
-exact `runSchedule` sinking-heuristic numbers may now fail — that's
-expected and fine, since this step is only checking the gate wires
-correctly, not asserting the forecast produces old-algorithm numbers).
-Revert `USE_SCHEDULE_FORECAST` back to `false` before committing.
+No existing test in `category-template-context.test.ts` exercises the
+`schedule` case's dispatch end-to-end (the only `type: 'schedule'`
+templates there today are in the `validation (init checks)` block,
+which only checks `init`-time errors, never reaches
+`runTemplatesForPriority`). Add a new describe block that runs both
+gate states explicitly and in parallel, each asserting the result
+matches calling the underlying function directly with equivalent
+inputs — this is a wiring/dispatch test, not a re-run of either
+algorithm's own correctness (that's covered in
+`schedule-template.test.ts`).
+
+First, extend this file's top-of-file mocks (currently `#server/db`
+only exposes `getCategories`, and `#server/schedules/app` isn't mocked
+at all — both are needed because `createScheduleList`, called by
+whichever function the gate dispatches to, calls `db.first`,
+`db.getAccounts`, and `getRuleForSchedule`):
+
+```ts
+vi.mock('#server/db', () => ({
+  getCategories: vi.fn(),
+  first: vi.fn(),
+  getAccounts: vi.fn(),
+}));
+
+vi.mock('#server/schedules/app', async () => {
+  const actualModule = await vi.importActual('#server/schedules/app');
+  return { ...actualModule, getRuleForSchedule: vi.fn() };
+});
+```
+
+Then, near the top of the file, import what the new tests need:
+```ts
+import { Rule } from '#server/rules';
+import { getRuleForSchedule } from '#server/schedules/app';
+
+import {
+  scheduleForecastConfig,
+  runSchedule,
+  runScheduleForecast,
+} from './schedule-template';
+```
+
+Add the new describe block (place it near `describe('full process', ...)`):
+
+```ts
+describe('schedule template gating', () => {
+  const category: CategoryEntity = {
+    id: 'gate-cat',
+    name: 'Gate Category',
+    group: 'g',
+    is_income: false,
+  };
+  const templates: Template[] = [
+    { type: 'schedule', name: 'Internet', directive: 'template', priority: 1 },
+    { type: 'schedule', name: 'Insurance', directive: 'template', priority: 1 },
+  ];
+
+  function mockTwoSchedules() {
+    vi.mocked(statements.getActiveSchedules).mockResolvedValue([
+      { name: 'Internet', id: 's1' },
+      { name: 'Insurance', id: 's2' },
+    ] as Awaited<ReturnType<typeof statements.getActiveSchedules>>);
+    vi.mocked(db.getAccounts).mockResolvedValue([]);
+    vi.mocked(db.first).mockImplementation(async (_q, params?: unknown[]) => {
+      const name = (params as string[] | undefined)?.[0] ?? '';
+      return { id: name === 'Internet' ? 1 : 2, completed: 0 };
+    });
+    vi.mocked(getRuleForSchedule).mockImplementation(async id => {
+      const isInternet = Number(id) === 1;
+      return new Rule({
+        id: String(id),
+        stage: 'pre',
+        conditionsOp: 'and',
+        conditions: [
+          {
+            op: 'is',
+            field: 'date',
+            value: isInternet
+              ? {
+                  start: '2024-01-15',
+                  interval: 1,
+                  frequency: 'monthly',
+                  patterns: [],
+                  skipWeekend: false,
+                  weekendSolveMode: 'before',
+                  endMode: 'never',
+                  endOccurrences: 1,
+                  endDate: '2099-01-01',
+                }
+              : {
+                  start: '2024-12-15',
+                  interval: 1,
+                  frequency: 'yearly',
+                  patterns: [],
+                  skipWeekend: false,
+                  weekendSolveMode: 'before',
+                  endMode: 'never',
+                  endOccurrences: 1,
+                  endDate: '2099-01-01',
+                },
+            type: 'date',
+          },
+          {
+            op: 'is',
+            field: 'amount',
+            value: isInternet ? -10000 : -60000,
+            type: 'number',
+          },
+        ],
+        actions: [],
+      });
+    });
+    vi.mocked(actions.isTrackingBudget).mockReturnValue(false);
+  }
+
+  beforeEach(() => {
+    mockPreferences(false, 'USD');
+    vi.mocked(actions.getSheetValue).mockResolvedValue(0);
+    vi.mocked(actions.getSheetBoolean).mockResolvedValue(false);
+    vi.mocked(actions.isTrackingBudget).mockReturnValue(false);
+    mockTwoSchedules();
+  });
+
+  afterEach(() => {
+    scheduleForecastConfig.enabled = false;
+  });
+
+  it('dispatches to runSchedule when the gate is explicitly disabled', async () => {
+    scheduleForecastConfig.enabled = false;
+
+    const instance = await CategoryTemplateContext.init(
+      templates,
+      category,
+      '2024-01',
+      0,
+    );
+    const result = await instance.runTemplatesForPriority(1, 100000, 100000);
+
+    const expected = await runSchedule(
+      templates,
+      '2024-01',
+      0,
+      0,
+      0,
+      0,
+      [],
+      category,
+      { code: 'USD', symbol: '$', name: 'US Dollar', decimalPlaces: 2, numberFormat: 'comma-dot', symbolFirst: true },
+    );
+    expect(result).toBe(expected.to_budget);
+  });
+
+  it('dispatches to runScheduleForecast when the gate is explicitly enabled', async () => {
+    scheduleForecastConfig.enabled = true;
+    vi.mocked(aql.aqlQuery).mockImplementation(async (query: unknown) => {
+      const queryStr = JSON.stringify(query);
+      if (queryStr.includes('transactions')) return { data: [], dependencies: [] };
+      if (queryStr.includes('hideFraction')) return { data: [{ value: 'false' }], dependencies: [] };
+      if (queryStr.includes('defaultCurrencyCode')) return { data: [{ value: 'USD' }], dependencies: [] };
+      return { data: [], dependencies: [] };
+    });
+
+    const instance = await CategoryTemplateContext.init(
+      templates,
+      category,
+      '2024-01',
+      0,
+    );
+    const result = await instance.runTemplatesForPriority(1, 100000, 100000);
+
+    const expected = await runScheduleForecast(
+      templates,
+      '2024-01',
+      0,
+      0,
+      0,
+      [],
+      category,
+      { code: 'USD', symbol: '$', name: 'US Dollar', decimalPlaces: 2, numberFormat: 'comma-dot', symbolFirst: true },
+    );
+    expect(result).toBe(expected.to_budget);
+  });
+});
+```
+
+Run: `yarn workspace @actual-app/core run test category-template-context.test.ts`
+Expected: PASS — both tests confirm correct dispatch; neither compares
+the two algorithms' outputs to each other, only each to its own direct
+call.
+
+Run: `yarn typecheck && yarn test`
+Expected: no errors; every other existing test in this file still
+passes unchanged (`scheduleForecastConfig.enabled` defaults to `false`
+and the new `afterEach` resets it, so nothing bleeds between tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/loot-core/src/server/budget/category-template-context.ts
+git add packages/loot-core/src/server/budget/category-template-context.ts packages/loot-core/src/server/budget/category-template-context.test.ts
 git commit -m "$(cat <<'EOF'
-[AI] feat: gate runScheduleForecast behind USE_SCHEDULE_FORECAST
+[AI] feat: gate runScheduleForecast behind scheduleForecastConfig
 
 Wires the new forecast-based smoothing algorithm into the schedule
-template dispatch, defaulting to off so existing behavior and tests
-are unaffected until perf is measured and a rollout decision is made.
+template dispatch, defaulting to off so existing behavior is
+unaffected until perf is measured and a rollout decision is made.
+Exposed as a mutable config object (rather than a bare constant) so
+both dispatch paths can be exercised explicitly and in parallel by
+tests, instead of only reachable via a manual one-off toggle.
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF
