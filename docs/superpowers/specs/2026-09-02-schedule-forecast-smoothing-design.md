@@ -227,10 +227,27 @@ today; no changes needed at the `redistributeBatch` call site itself.
 
 ## Testing
 
+Permanent tests assert the new algorithm's own correctness in absolute
+terms — never by comparing its output against `runSchedule`'s. That
+comparison is only meaningful while both algorithms coexist; once the
+old heuristic is removed (or if it never is, but is deprioritized) a
+test asserting "forecast beats old algorithm" has nothing left to
+mean. The "this fixes overholding" claim is demonstrated once, by hand
+or in a throwaway script, when the feature is proposed for wider
+rollout — not carried in the suite.
+
 In `packages/loot-core/src/server/budget/schedule-template.test.ts`:
-- Single smooth schedule matches old behavior within rounding.
-- Two smooth schedules smoothing to a lower peak category balance than
-  the naive independent-sum approach (the core bug this design fixes).
+- A single smooth schedule produces a `candidate` equal to its own
+  monthly-equivalent amount (the degenerate case has one obviously
+  correct answer, independent of what the old algorithm does).
+- Two smooth schedules: assert the projected month-end balance never
+  goes negative anywhere in the 60-month window, and that the returned
+  `candidate` is the minimal contribution satisfying that (i.e.
+  raising it by any smaller increment than the algorithm's own
+  adjustment step would have left some month negative, or the surplus
+  step didn't over-reduce it either) — an absolute correctness
+  assertion on the iteration's own postcondition, not a comparison to
+  another algorithm.
 - A same-month-due smooth schedule forces immediate full coverage that
   month (fund-then-spend ordering check).
 - A `full`-flagged schedule stays separate/on top of the forecast,
